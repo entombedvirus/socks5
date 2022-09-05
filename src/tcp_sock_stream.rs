@@ -32,20 +32,25 @@ fn write_protocol_message(
 enum AuthMethod {
     NoAuth,
 }
-impl AuthMethod {
-    fn to_value(&self) -> u8 {
-        match self {
-            Self::NoAuth => 0x00,
-        }
-    }
 
-    fn from_value(buf: u8) -> io::Result<AuthMethod> {
-        match buf {
+impl TryFrom<u8> for AuthMethod {
+    type Error = io::Error;
+
+    fn try_from(value: u8) -> Result<Self, Self::Error> {
+        match value {
             0x00 => Ok(Self::NoAuth),
             _ => Err(io::Error::new(
                 io::ErrorKind::InvalidData,
-                format!("unxpected AuthMethod: {buf}"),
+                format!("unxpected AuthMethod: {value}"),
             )),
+        }
+    }
+}
+
+impl Into<u8> for &AuthMethod {
+    fn into(self) -> u8 {
+        match *self {
+            AuthMethod::NoAuth => 0x00,
         }
     }
 }
@@ -56,11 +61,12 @@ struct ClientGreeting(Vec<AuthMethod>);
 
 impl ClientGreeting {
     fn write_to(&self, conn: &mut TcpStream) -> io::Result<()> {
-        let buf = vec![SOCKS_VERSION, self.0.len() as u8];
-        let buf: Vec<u8> = buf
-            .into_iter()
-            .chain(self.0.iter().map(|auth_method| auth_method.to_value()))
-            .collect();
+        let mut buf = Vec::with_capacity(1 + 1 + self.0.len());
+        buf.push(SOCKS_VERSION);
+        buf.push(self.0.len() as u8);
+        for auth_method in &self.0 {
+            buf.push(auth_method.into());
+        }
         conn.write_all(&buf)?;
         Ok(())
     }
@@ -79,6 +85,6 @@ impl ServerAuthChoice {
             ));
         }
 
-        Ok(Self(AuthMethod::from_value(buf[1])?))
+        Ok(Self(AuthMethod::try_from(buf[1])?))
     }
 }
