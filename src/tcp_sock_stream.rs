@@ -16,9 +16,10 @@ pub fn connect(req: ConnectRequest) -> io::Result<TcpStream> {
 }
 
 fn socks_handshake(conn: &mut TcpStream, req: &ConnectRequest) -> io::Result<()> {
-    let resp: proto::ServerAuthChoice =
-        proto::send_recv(conn, proto::ClientGreeting(vec![proto::AuthMethod::NoAuth]))?;
-    eprintln!("got resp: {resp:?}");
+    let resp: proto::ServerAuthChoice = dbg!(proto::send_recv(
+        conn,
+        proto::ClientGreeting(vec![proto::AuthMethod::NoAuth])
+    )?);
 
     if resp.0 != proto::AuthMethod::NoAuth {
         return Err(io::Error::new(
@@ -31,15 +32,14 @@ fn socks_handshake(conn: &mut TcpStream, req: &ConnectRequest) -> io::Result<()>
         ));
     }
 
-    let resp: proto::ServerResponse = proto::send_recv(
+    let resp: proto::ServerResponse = dbg!(proto::send_recv(
         conn,
         proto::ClientConnectionRequest {
             cmd: proto::ClientCommand::EstablishConnection,
             dest_port: req.dest_port,
             dest_addr: req.dest_addr.parse()?,
         },
-    )?;
-    eprintln!("got resp: {resp:?}");
+    )?);
 
     let status = resp.status;
     if status == proto::ServerStatus::RequestGranted {
