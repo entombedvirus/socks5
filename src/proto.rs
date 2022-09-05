@@ -1,6 +1,7 @@
 use std::{
     io::{self, Read, Write},
     net::{Ipv4Addr, Ipv6Addr, TcpStream},
+    str::FromStr,
 };
 
 const SOCKS_VERSION: u8 = 0x05;
@@ -94,6 +95,19 @@ pub enum Address {
     Ipv6(Ipv6Addr),
 }
 
+impl FromStr for Address {
+    type Err = io::Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.parse::<std::net::SocketAddr>() {
+            Ok(std::net::SocketAddr::V4(v4)) => Ok(Address::Ipv4(*v4.ip())),
+            Ok(std::net::SocketAddr::V6(v6)) => Ok(Address::Ipv6(*v6.ip())),
+            // must be a domain name
+            Err(_) => Ok(Address::DomainName(s.to_owned())),
+        }
+    }
+}
+
 impl Into<Vec<u8>> for &Address {
     fn into(self) -> Vec<u8> {
         let mut buf = vec![];
@@ -113,6 +127,38 @@ impl Into<Vec<u8>> for &Address {
             }
         }
         buf
+    }
+}
+
+impl Recievable for Address {
+    fn read_from(conn: &mut TcpStream) -> io::Result<Box<Self>> {
+        let mut buf = [0_u8; 255];
+        conn.read_exact(&mut buf[..1])?;
+        match buf[0] {
+            0x01 => {
+                conn.read_exact(&mut buf[..4])?;
+                let addr = Ipv4Addr::new(buf[0], buf[1], buf[2], buf[3]);
+                Ok(Box::new(Self::Ipv4(addr)))
+            }
+            0x03 => {
+                conn.read_exact(&mut buf[..1])?;
+                let dn_len = buf[0] as usize;
+                conn.read_exact(&mut buf[..dn_len])?;
+                let dn = String::from_utf8(buf[..dn_len].to_vec())
+                    .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err.to_string()))?;
+                Ok(Box::new(Self::DomainName(dn)))
+            }
+            0x04 => {
+                let mut buf = [0_u8; 16];
+                conn.read_exact(&mut buf)?;
+                let addr = Ipv6Addr::from(buf);
+                Ok(Box::new(Self::Ipv6(addr)))
+            }
+            other => Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("proto: failed to parse address. expected 0x01, 0x03, 0x04: got: {other}"),
+            )),
+        }
     }
 }
 
@@ -153,7 +199,7 @@ impl Sendable for ClientConnectionRequest {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub enum ServerStatus {
     RequestGranted,
     GeneralFailure,
@@ -189,11 +235,15 @@ impl TryFrom<u8> for ServerStatus {
 }
 
 #[derive(Debug)]
-pub struct ServerResponse(pub ServerStatus);
+pub struct ServerResponse {
+    pub status: ServerStatus,
+    pub bound_address: Address,
+    pub bound_port: u16,
+}
 
 impl Recievable for ServerResponse {
     fn read_from(conn: &mut TcpStream) -> io::Result<Box<Self>> {
-        let mut buf = [0_u8; 2];
+        let mut buf = [0_u8; 3];
         conn.read_exact(&mut buf)?;
         if buf[0] != SOCKS_VERSION {
             return Err(io::Error::new(
@@ -201,6 +251,24 @@ impl Recievable for ServerResponse {
                 format!("expected socks version: {}, got: {}", SOCKS_VERSION, buf[0]),
             ));
         }
-        Ok(Box::new(Self(ServerStatus::try_from(buf[1])?)))
+        let status = ServerStatus::try_from(buf[1])?;
+        if buf[2] != 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("expected RSV byte to be zero, got: {}", buf[2]),
+            ));
+        }
+
+        let bound_address = *Address::read_from(conn)?;
+
+        let mut buf = [0u8; 2];
+        conn.read_exact(&mut buf)?;
+        let bound_port = u16::from_be_bytes(buf);
+
+        Ok(Box::new(Self {
+            status,
+            bound_address,
+            bound_port,
+        }))
     }
 }
