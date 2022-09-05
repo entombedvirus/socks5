@@ -1,5 +1,6 @@
 use std::{env, io, thread};
 
+use ::socks5::proto;
 use ::socks5::tcp_sock_stream;
 
 fn main() {
@@ -13,6 +14,7 @@ fn main() {
         let mut stream_in = tcp_sock_stream::connect(tcp_sock_stream::ConnectRequest {
             server_addr: server_addr.to_owned(),
             dest_addr: dest_addr.to_owned(),
+            supported_auth_methods: vec![proto::AuthMethod::NoAuth],
         })
         .unwrap();
         let mut stream_out = stream_in.try_clone().unwrap();

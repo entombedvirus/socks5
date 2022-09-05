@@ -1,3 +1,4 @@
+pub mod proto;
 pub mod tcp_sock_stream;
 
 pub fn add(left: usize, right: usize) -> usize {
