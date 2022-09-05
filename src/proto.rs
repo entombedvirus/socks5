@@ -5,12 +5,20 @@ use std::{
 
 const SOCKS_VERSION: u8 = 0x05;
 
-pub fn write_message(
+pub trait Sendable {
+    fn write_to(&self, conn: &mut TcpStream) -> io::Result<()>;
+}
+
+pub trait Recievable {
+    fn read_from(conn: &mut TcpStream) -> io::Result<Box<Self>>;
+}
+
+pub fn send_recv<Req: Sendable, Resp: Recievable>(
     conn: &mut TcpStream,
-    msg_to_send: ClientGreeting,
-) -> io::Result<ServerAuthChoice> {
+    msg_to_send: Req,
+) -> io::Result<Box<Resp>> {
     msg_to_send.write_to(conn)?;
-    ServerAuthChoice::read_from(conn)
+    Resp::read_from(conn)
 }
 
 #[derive(Debug)]
@@ -49,7 +57,7 @@ impl Into<u8> for &AuthMethod {
 #[derive(Debug)]
 pub struct ClientGreeting(pub Vec<AuthMethod>);
 
-impl ClientGreeting {
+impl Sendable for ClientGreeting {
     fn write_to(&self, conn: &mut TcpStream) -> io::Result<()> {
         let mut buf = Vec::with_capacity(1 + 1 + self.0.len());
         buf.push(SOCKS_VERSION);
@@ -64,8 +72,8 @@ impl ClientGreeting {
 
 #[derive(Debug)]
 pub struct ServerAuthChoice(pub AuthMethod);
-impl ServerAuthChoice {
-    fn read_from(conn: &mut TcpStream) -> io::Result<Self> {
+impl Recievable for ServerAuthChoice {
+    fn read_from(conn: &mut TcpStream) -> io::Result<Box<Self>> {
         let mut buf = [0_u8; 2];
         conn.read_exact(&mut buf)?;
         if buf[0] != SOCKS_VERSION {
@@ -75,6 +83,6 @@ impl ServerAuthChoice {
             ));
         }
 
-        Ok(Self(AuthMethod::try_from(buf[1])?))
+        Ok(Box::new(Self(AuthMethod::try_from(buf[1])?)))
     }
 }

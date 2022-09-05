@@ -15,7 +15,7 @@ pub fn connect(req: ConnectRequest) -> io::Result<TcpStream> {
 }
 
 fn socks_handshake(conn: &mut TcpStream, _req: &ConnectRequest) -> io::Result<()> {
-    let resp = proto::write_message(
+    let resp: Box<proto::ServerAuthChoice> = proto::send_recv(
         conn,
         proto::ClientGreeting(vec![proto::AuthMethod::NoAuth, proto::AuthMethod::UserPass]),
     )?;
