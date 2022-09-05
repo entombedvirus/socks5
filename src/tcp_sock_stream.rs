@@ -18,31 +18,36 @@ pub fn connect(req: ConnectRequest) -> io::Result<TcpStream> {
 fn socks_handshake(conn: &mut TcpStream, req: &ConnectRequest) -> io::Result<()> {
     let resp: proto::ServerAuthChoice =
         proto::send_recv(conn, proto::ClientGreeting(vec![proto::AuthMethod::NoAuth]))?;
-    println!("got resp: {resp:?}");
-    match resp {
-        proto::ServerAuthChoice(proto::AuthMethod::NoAuth) => {
-            let resp: proto::ServerResponse = proto::send_recv(
-                conn,
-                proto::ClientConnectionRequest {
-                    cmd: proto::ClientCommand::EstablishConnection,
-                    dest_port: req.dest_port,
-                    dest_addr: req.dest_addr.parse()?,
-                },
-            )?;
-            println!("got resp: {resp:?}");
-            let status = resp.status;
-            if status == proto::ServerStatus::RequestGranted {
-                Ok(())
-            } else {
-                Err(io::Error::new(
-                    io::ErrorKind::PermissionDenied,
-                    format!("proxy rejected establish connection with status: {status:?}"),
-                ))
-            }
-        }
-        _ => Err(io::Error::new(
+    eprintln!("got resp: {resp:?}");
+
+    if resp.0 != proto::AuthMethod::NoAuth {
+        return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
-            "auth method negotiation failed",
-        )),
+            format!(
+                "auth method negotiation failed. expected: {:?}, got: {:?}",
+                proto::AuthMethod::NoAuth,
+                resp.0
+            ),
+        ));
+    }
+
+    let resp: proto::ServerResponse = proto::send_recv(
+        conn,
+        proto::ClientConnectionRequest {
+            cmd: proto::ClientCommand::EstablishConnection,
+            dest_port: req.dest_port,
+            dest_addr: req.dest_addr.parse()?,
+        },
+    )?;
+    eprintln!("got resp: {resp:?}");
+
+    let status = resp.status;
+    if status == proto::ServerStatus::RequestGranted {
+        Ok(())
+    } else {
+        Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!("proxy rejected establish connection with status: {status:?}"),
+        ))
     }
 }

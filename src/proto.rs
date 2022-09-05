@@ -24,7 +24,7 @@ pub fn send_recv<Req: Sendable, Resp: Recievable>(
     Resp::read_from(conn)
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum AuthMethod {
     NoAuth,
     GssApi,
