@@ -16,12 +16,12 @@ pub fn connect(req: ConnectRequest) -> io::Result<TcpStream> {
 }
 
 fn socks_handshake(conn: &mut TcpStream, req: &ConnectRequest) -> io::Result<()> {
-    let resp: Box<proto::ServerAuthChoice> =
+    let resp: proto::ServerAuthChoice =
         proto::send_recv(conn, proto::ClientGreeting(vec![proto::AuthMethod::NoAuth]))?;
     println!("got resp: {resp:?}");
-    match *resp {
+    match resp {
         proto::ServerAuthChoice(proto::AuthMethod::NoAuth) => {
-            let resp: Box<proto::ServerResponse> = proto::send_recv(
+            let resp: proto::ServerResponse = proto::send_recv(
                 conn,
                 proto::ClientConnectionRequest {
                     cmd: proto::ClientCommand::EstablishConnection,

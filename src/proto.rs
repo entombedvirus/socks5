@@ -11,13 +11,15 @@ pub trait Sendable {
 }
 
 pub trait Recievable {
-    fn read_from(conn: &mut TcpStream) -> io::Result<Box<Self>>;
+    fn read_from(conn: &mut TcpStream) -> io::Result<Self>
+    where
+        Self: Sized;
 }
 
 pub fn send_recv<Req: Sendable, Resp: Recievable>(
     conn: &mut TcpStream,
     msg_to_send: Req,
-) -> io::Result<Box<Resp>> {
+) -> io::Result<Resp> {
     msg_to_send.write_to(conn)?;
     Resp::read_from(conn)
 }
@@ -74,7 +76,7 @@ impl Sendable for ClientGreeting {
 #[derive(Debug)]
 pub struct ServerAuthChoice(pub AuthMethod);
 impl Recievable for ServerAuthChoice {
-    fn read_from(conn: &mut TcpStream) -> io::Result<Box<Self>> {
+    fn read_from(conn: &mut TcpStream) -> io::Result<Self> {
         let mut buf = [0_u8; 2];
         conn.read_exact(&mut buf)?;
         if buf[0] != SOCKS_VERSION {
@@ -84,7 +86,7 @@ impl Recievable for ServerAuthChoice {
             ));
         }
 
-        Ok(Box::new(Self(AuthMethod::try_from(buf[1])?)))
+        Ok(Self(AuthMethod::try_from(buf[1])?))
     }
 }
 
@@ -131,14 +133,14 @@ impl Into<Vec<u8>> for &Address {
 }
 
 impl Recievable for Address {
-    fn read_from(conn: &mut TcpStream) -> io::Result<Box<Self>> {
+    fn read_from(conn: &mut TcpStream) -> io::Result<Self> {
         let mut buf = [0_u8; 255];
         conn.read_exact(&mut buf[..1])?;
         match buf[0] {
             0x01 => {
                 conn.read_exact(&mut buf[..4])?;
                 let addr = Ipv4Addr::new(buf[0], buf[1], buf[2], buf[3]);
-                Ok(Box::new(Self::Ipv4(addr)))
+                Ok(Self::Ipv4(addr))
             }
             0x03 => {
                 conn.read_exact(&mut buf[..1])?;
@@ -146,13 +148,13 @@ impl Recievable for Address {
                 conn.read_exact(&mut buf[..dn_len])?;
                 let dn = String::from_utf8(buf[..dn_len].to_vec())
                     .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err.to_string()))?;
-                Ok(Box::new(Self::DomainName(dn)))
+                Ok(Self::DomainName(dn))
             }
             0x04 => {
                 let mut buf = [0_u8; 16];
                 conn.read_exact(&mut buf)?;
                 let addr = Ipv6Addr::from(buf);
-                Ok(Box::new(Self::Ipv6(addr)))
+                Ok(Self::Ipv6(addr))
             }
             other => Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -242,7 +244,7 @@ pub struct ServerResponse {
 }
 
 impl Recievable for ServerResponse {
-    fn read_from(conn: &mut TcpStream) -> io::Result<Box<Self>> {
+    fn read_from(conn: &mut TcpStream) -> io::Result<Self> {
         let mut buf = [0_u8; 3];
         conn.read_exact(&mut buf)?;
         if buf[0] != SOCKS_VERSION {
@@ -259,16 +261,16 @@ impl Recievable for ServerResponse {
             ));
         }
 
-        let bound_address = *Address::read_from(conn)?;
+        let bound_address = Address::read_from(conn)?;
 
         let mut buf = [0u8; 2];
         conn.read_exact(&mut buf)?;
         let bound_port = u16::from_be_bytes(buf);
 
-        Ok(Box::new(Self {
+        Ok(Self {
             status,
             bound_address,
             bound_port,
-        }))
+        })
     }
 }
