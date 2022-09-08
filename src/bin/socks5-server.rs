@@ -1,6 +1,6 @@
 use std::{env, io};
 
-use socks5::tcp_server_stream::{self, ClientStream};
+use socks5::tcp_server_stream;
 use tokio::net::TcpListener;
 
 #[tokio::main]
@@ -17,7 +17,7 @@ async fn main() -> Result<(), io::Error> {
     loop {
         let (stream, _) = lis.accept().await?;
         tokio::spawn(async move {
-            let result = ClientStream::handle(stream);
+            let result = tcp_server_stream::handle(stream);
             if let Err(err) = result.await {
                 eprintln!("handle_stream: {err:?}");
             }

@@ -1,15 +1,12 @@
 use std::net::{Ipv4Addr, Ipv6Addr};
 
 use futures::future::TryFutureExt;
-use futures::prelude::*;
 use tokio::{
     io::{self, copy_bidirectional, AsyncReadExt, AsyncWriteExt},
     net::TcpStream,
 };
 
 use crate::proto;
-
-pub struct ClientStream {}
 
 struct WaitingForGreeting {
     stream: TcpStream,
@@ -23,93 +20,107 @@ struct ServingConnectRequest {
     request: proto::ClientConnectionRequest,
 }
 
-impl ClientStream {
-    pub async fn handle(stream: TcpStream) -> io::Result<()> {
-        Self::read_client_greeting(stream)
-            .and_then(|state| Self::choose_auth_method(state))
-            .and_then(|state| Self::read_connect_request(state))
-            .and_then(|state| Self::serve_connect_request(state))
-            .await
-    }
+pub async fn handle(stream: TcpStream) -> io::Result<()> {
+    read_client_greeting(stream)
+        .and_then(|state| choose_auth_method(state))
+        .and_then(|state| read_connect_request(state))
+        .and_then(|state| serve_connect_request(state))
+        .await
+}
 
-    async fn read_client_greeting(mut stream: TcpStream) -> io::Result<WaitingForGreeting> {
-        match proto::ClientGreeting::read_from_stream(&mut stream).await {
-            Ok(greeting) => Ok(WaitingForGreeting { stream, greeting }),
-            Err(err) => {
-                stream.write_all(&[proto::SOCKS_VERSION, 0xff]).await?;
-                Err(err)
-            }
+async fn read_client_greeting(mut stream: TcpStream) -> io::Result<WaitingForGreeting> {
+    match proto::ClientGreeting::read_from_stream(&mut stream).await {
+        Ok(greeting) => Ok(WaitingForGreeting { stream, greeting }),
+        Err(err) => {
+            stream.write_all(&[proto::SOCKS_VERSION, 0xff]).await?;
+            Err(err)
         }
     }
+}
 
-    async fn choose_auth_method(
-        WaitingForGreeting {
-            mut stream,
-            greeting,
-        }: WaitingForGreeting,
-    ) -> io::Result<WaitingForConnectRequest> {
-        if greeting.0.contains(&proto::AuthMethod::NoAuth) {
-            stream
-                .write_all(&[proto::SOCKS_VERSION, proto::AuthMethod::NoAuth as u8])
-                .await?;
-            Ok(WaitingForConnectRequest { stream })
-        } else {
-            stream.write_all(&[proto::SOCKS_VERSION, 0xff]).await?;
+async fn choose_auth_method(
+    WaitingForGreeting {
+        mut stream,
+        greeting,
+    }: WaitingForGreeting,
+) -> io::Result<WaitingForConnectRequest> {
+    if greeting.0.contains(&proto::AuthMethod::NoAuth) {
+        stream
+            .write_all(&[proto::SOCKS_VERSION, proto::AuthMethod::NoAuth as u8])
+            .await?;
+        Ok(WaitingForConnectRequest { stream })
+    } else {
+        stream.write_all(&[proto::SOCKS_VERSION, 0xff]).await?;
+        Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "client does not support NoAuth authentication method",
+        ))
+    }
+}
+
+async fn read_connect_request(
+    WaitingForConnectRequest { mut stream }: WaitingForConnectRequest,
+) -> io::Result<ServingConnectRequest> {
+    match proto::ClientConnectionRequest::read_from_stream(&mut stream).await {
+        Ok(request) => Ok(ServingConnectRequest { stream, request }),
+        Err(err) => {
+            let resp = proto::ServerResponse {
+                status: proto::ServerStatus::GeneralFailure,
+                bound_address: proto::EMPTY_ADDRESS,
+                bound_port: 0,
+            };
+            stream.write_all(&resp.as_bytes()).await?;
+            Err(err)
+        }
+    }
+}
+
+async fn serve_connect_request(
+    ServingConnectRequest {
+        mut stream,
+        request,
+    }: ServingConnectRequest,
+) -> io::Result<()> {
+    match request.cmd {
+        proto::ClientCommand::EstablishConnection => {
+            serve_establish_connection(stream, request).await
+        }
+        cmd => {
+            let resp = proto::ServerResponse {
+                status: proto::ServerStatus::CommandNotSupported,
+                bound_address: proto::EMPTY_ADDRESS,
+                bound_port: 0,
+            };
+            stream.write_all(&resp.as_bytes()).await?;
             Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "client does not support NoAuth authentication method",
+                io::ErrorKind::InvalidInput,
+                format!("client command {cmd:?} is not supported"),
             ))
         }
     }
+}
 
-    async fn read_connect_request(
-        WaitingForConnectRequest { mut stream }: WaitingForConnectRequest,
-    ) -> io::Result<ServingConnectRequest> {
-        match proto::ClientConnectionRequest::read_from_stream(&mut stream).await {
-            Ok(request) => Ok(ServingConnectRequest { stream, request }),
-            Err(err) => {
-                let resp = proto::ServerResponse {
-                    status: proto::ServerStatus::GeneralFailure,
-                    bound_address: proto::EMPTY_ADDRESS,
-                    bound_port: 0,
-                };
-                stream.write_all(&resp.as_bytes()).await?;
-                Err(err)
-            }
-        }
-    }
+async fn serve_establish_connection(
+    mut stream: TcpStream,
+    request: proto::ClientConnectionRequest,
+) -> io::Result<()> {
+    let mut dialed_conn = TcpStream::connect(format!(
+        "{}:{}",
+        request.dest_addr.to_ip_addr(),
+        request.dest_port
+    ))
+    .await?;
 
-    async fn serve_connect_request(
-        ServingConnectRequest {
-            mut stream,
-            request,
-        }: ServingConnectRequest,
-    ) -> io::Result<()> {
-        if request.cmd != proto::ClientCommand::EstablishConnection {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!("client command is not supported: {:?}", request.cmd),
-            ));
-        }
+    let resp = proto::ServerResponse {
+        status: proto::ServerStatus::RequestGranted,
+        bound_address: proto::EMPTY_ADDRESS,
+        bound_port: 0,
+    };
+    stream.write_all(&resp.as_bytes()).await?;
 
-        let mut dialed_conn = TcpStream::connect(format!(
-            "{}:{}",
-            request.dest_addr.to_ip_addr(),
-            request.dest_port
-        ))
-        .await?;
-
-        let resp = proto::ServerResponse {
-            status: proto::ServerStatus::RequestGranted,
-            bound_address: proto::EMPTY_ADDRESS,
-            bound_port: 0,
-        };
-        stream.write_all(&resp.as_bytes()).await?;
-
-        let (a, b) = copy_bidirectional(&mut stream, &mut dialed_conn).await?;
-        eprintln!("proxied total {}, bytes", a + b);
-        Ok(())
-    }
+    let (a, b) = copy_bidirectional(&mut stream, &mut dialed_conn).await?;
+    eprintln!("proxied total {}, bytes", a + b);
+    Ok(())
 }
 
 impl proto::ClientGreeting {
@@ -134,14 +145,11 @@ impl proto::ClientGreeting {
             .read_to_end(&mut auth_bytes)
             .await?;
 
-        match auth_bytes
+        auth_bytes
             .into_iter()
             .map(|b| b.try_into())
             .try_collect::<Vec<proto::AuthMethod>>()
-        {
-            Ok(auths) => Ok(Self(auths)),
-            Err(err) => Err(err),
-        }
+            .map(|auths| Self(auths))
     }
 }
 

@@ -103,6 +103,27 @@ pub enum Address {
     Ipv6(Ipv6Addr),
 }
 
+impl Address {
+    pub fn as_bytes(&self) -> Vec<u8> {
+        let mut buf = Vec::new();
+        match self {
+            Address::Ipv4(addr) => {
+                buf.push(0x01);
+                buf.extend_from_slice(&addr.octets());
+            }
+            Address::DomainName(dn) => {
+                buf.push(0x03);
+                buf.push(dn.len() as u8);
+                buf.extend_from_slice(dn.as_bytes());
+            }
+            Address::Ipv6(addr) => {
+                buf.push(0x04);
+                buf.extend_from_slice(&addr.octets());
+            }
+        }
+        buf
+    }
+}
 impl FromStr for Address {
     type Err = io::Error;
 
@@ -285,6 +306,19 @@ pub struct ServerResponse {
     pub status: ServerStatus,
     pub bound_address: Address,
     pub bound_port: u16,
+}
+
+impl ServerResponse {
+    pub fn as_bytes(&self) -> Vec<u8> {
+        let mut buf = Vec::new();
+        buf.push(SOCKS_VERSION);
+        buf.push(self.status as u8);
+        buf.push(RESERVED);
+        buf.extend_from_slice(&self.bound_address.as_bytes());
+        buf.extend_from_slice(&self.bound_port.to_be_bytes());
+
+        buf
+    }
 }
 
 impl Recievable for ServerResponse {
