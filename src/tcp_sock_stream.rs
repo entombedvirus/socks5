@@ -1,3 +1,5 @@
+mod sync_proto;
+
 use std::{io, net::TcpStream};
 
 use crate::proto;
@@ -16,10 +18,9 @@ pub fn connect(req: ConnectRequest) -> io::Result<TcpStream> {
 }
 
 fn socks_handshake(conn: &mut TcpStream, req: &ConnectRequest) -> io::Result<()> {
-    let resp: proto::ServerAuthChoice = dbg!(proto::send_recv(
-        conn,
-        proto::ClientGreeting(vec![proto::AuthMethod::NoAuth])
-    )?);
+    let resp: proto::ServerAuthChoice =
+        sync_proto::send_recv(conn, proto::ClientGreeting(vec![proto::AuthMethod::NoAuth]))?;
+    dbg!("got resp: {resp:?}");
 
     if resp.0 != proto::AuthMethod::NoAuth {
         return Err(io::Error::new(
@@ -32,7 +33,7 @@ fn socks_handshake(conn: &mut TcpStream, req: &ConnectRequest) -> io::Result<()>
         ));
     }
 
-    let resp: proto::ServerResponse = dbg!(proto::send_recv(
+    let resp: proto::ServerResponse = dbg!(sync_proto::send_recv(
         conn,
         proto::ClientConnectionRequest {
             cmd: proto::ClientCommand::EstablishConnection,
