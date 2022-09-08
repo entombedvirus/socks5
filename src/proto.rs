@@ -1,6 +1,6 @@
 use std::{
     io,
-    net::{Ipv4Addr, Ipv6Addr},
+    net::{Ipv4Addr, Ipv6Addr, SocketAddr},
     str::FromStr,
 };
 
@@ -74,6 +74,15 @@ impl FromStr for Address {
             Ok(std::net::SocketAddr::V6(v6)) => Ok(Address::Ipv6(*v6.ip())),
             // must be a domain name
             Err(_) => Ok(Address::DomainName(s.to_owned())),
+        }
+    }
+}
+
+impl From<SocketAddr> for Address {
+    fn from(addr: SocketAddr) -> Self {
+        match addr {
+            SocketAddr::V4(addr) => Self::Ipv4(*addr.ip()),
+            SocketAddr::V6(addr) => Self::Ipv6(*addr.ip()),
         }
     }
 }

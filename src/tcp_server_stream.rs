@@ -3,7 +3,7 @@ mod async_proto;
 use futures::future::TryFutureExt;
 use tokio::{
     io::{self, copy_bidirectional, AsyncWriteExt},
-    net::TcpStream,
+    net::{TcpListener, TcpStream},
 };
 
 use crate::proto;
@@ -85,6 +85,9 @@ async fn serve_connect_request(
         proto::ClientCommand::EstablishConnection => {
             serve_establish_connection(stream, request).await
         }
+        proto::ClientCommand::EstablishPortBinding => {
+            serve_establish_port_bindings(stream, request).await
+        }
         cmd => {
             let resp = proto::ServerResponse {
                 status: proto::ServerStatus::CommandNotSupported,
@@ -98,6 +101,37 @@ async fn serve_connect_request(
             ))
         }
     }
+}
+
+async fn serve_establish_port_bindings(
+    mut stream: TcpStream,
+    request: proto::ClientConnectionRequest,
+) -> io::Result<()> {
+    let binding = TcpListener::bind(format!(
+        "{}:{}",
+        request.dest_addr.to_ip_addr(),
+        request.dest_port,
+    ))
+    .await?;
+    let binding_addr = binding.local_addr()?;
+
+    let resp = proto::ServerResponse {
+        status: proto::ServerStatus::RequestGranted,
+        bound_address: binding_addr.into(),
+        bound_port: binding_addr.port(),
+    };
+    stream.write_all(&resp.as_bytes()).await?;
+
+    let (mut incoming_stream, incoming_addr) = binding.accept().await?;
+    let resp = proto::ServerResponse {
+        status: proto::ServerStatus::RequestGranted,
+        bound_address: incoming_addr.into(),
+        bound_port: incoming_addr.port(),
+    };
+    stream.write_all(&resp.as_bytes()).await?;
+
+    copy_bidirectional(&mut stream, &mut incoming_stream).await?;
+    Ok(())
 }
 
 async fn serve_establish_connection(
