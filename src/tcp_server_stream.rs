@@ -81,6 +81,7 @@ async fn serve_connect_request(
         request,
     }: ServingConnectRequest,
 ) -> io::Result<()> {
+    dbg!(&request);
     match request.cmd {
         proto::ClientCommand::EstablishConnection => {
             serve_establish_connection(stream, request).await
@@ -109,7 +110,7 @@ async fn serve_establish_port_bindings(
 ) -> io::Result<()> {
     let binding = TcpListener::bind(format!(
         "{}:{}",
-        request.dest_addr.to_ip_addr(),
+        request.dest_addr.to_string(),
         request.dest_port,
     ))
     .await?;
@@ -140,7 +141,7 @@ async fn serve_establish_connection(
 ) -> io::Result<()> {
     let mut dialed_conn = TcpStream::connect(format!(
         "{}:{}",
-        request.dest_addr.to_ip_addr(),
+        request.dest_addr.to_string(),
         request.dest_port
     ))
     .await?;

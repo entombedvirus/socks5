@@ -89,8 +89,7 @@ impl Sendable for ClientConnectionRequest {
         buf.push(SOCKS_VERSION);
         buf.push(self.cmd as u8);
         buf.push(0x00); // RSV: must be always zero
-        let addr_bytes: Vec<u8> = (&self.dest_addr).into();
-        buf.extend_from_slice(&addr_bytes);
+        buf.extend_from_slice(&self.dest_addr.as_bytes());
         buf.extend_from_slice(&self.dest_port.to_be_bytes());
         conn.write_all(&buf)
     }

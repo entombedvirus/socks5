@@ -17,8 +17,7 @@ async fn main() -> Result<(), io::Error> {
     loop {
         let (stream, _) = lis.accept().await?;
         tokio::spawn(async move {
-            let result = tcp_server_stream::handle(stream);
-            if let Err(err) = result.await {
+            if let Err(err) = tcp_server_stream::handle(stream).await {
                 eprintln!("handle_stream: {err:?}");
             }
         });

@@ -87,30 +87,8 @@ impl From<SocketAddr> for Address {
     }
 }
 
-impl Into<Vec<u8>> for &Address {
-    fn into(self) -> Vec<u8> {
-        let mut buf = vec![];
-        match self {
-            Address::Ipv4(addr) => {
-                buf.push(0x01);
-                buf.extend_from_slice(&addr.octets());
-            }
-            Address::DomainName(dn) => {
-                buf.push(0x03);
-                buf.push(dn.len() as u8);
-                buf.extend_from_slice(dn.as_bytes());
-            }
-            Address::Ipv6(addr) => {
-                buf.push(0x04);
-                buf.extend_from_slice(&addr.octets());
-            }
-        }
-        buf
-    }
-}
-
 impl Address {
-    pub fn to_ip_addr(&self) -> String {
+    pub fn to_string(&self) -> String {
         match self {
             Address::Ipv4(addr) => addr.to_string(),
             Address::DomainName(dn) => dn.to_owned(),
@@ -157,15 +135,15 @@ pub struct ClientConnectionRequest {
 
 #[derive(Debug, PartialEq)]
 pub enum ServerStatus {
-    RequestGranted,
-    GeneralFailure,
-    ConnectionNotAllowedByRuleset,
-    NetworkUnreachable,
-    HostUnreachable,
-    ConnectionRefusedByDestinationHost,
-    TtlExpired,
-    CommandNotSupported,
-    AddressTypeNotSupported,
+    RequestGranted = 0x00,
+    GeneralFailure = 0x01,
+    ConnectionNotAllowedByRuleset = 0x02,
+    NetworkUnreachable = 0x03,
+    HostUnreachable = 0x04,
+    ConnectionRefusedByDestinationHost = 0x05,
+    TtlExpired = 0x06,
+    CommandNotSupported = 0x07,
+    AddressTypeNotSupported = 0x08,
 }
 
 impl TryFrom<u8> for ServerStatus {
@@ -186,22 +164,6 @@ impl TryFrom<u8> for ServerStatus {
                 io::ErrorKind::InvalidData,
                 format!("unxpected ServerStatus: {value}"),
             )),
-        }
-    }
-}
-
-impl Into<u8> for ServerStatus {
-    fn into(self) -> u8 {
-        match self {
-            Self::RequestGranted => 0x00,
-            Self::GeneralFailure => 0x01,
-            Self::ConnectionNotAllowedByRuleset => 0x02,
-            Self::NetworkUnreachable => 0x03,
-            Self::HostUnreachable => 0x04,
-            Self::ConnectionRefusedByDestinationHost => 0x05,
-            Self::TtlExpired => 0x06,
-            Self::CommandNotSupported => 0x07,
-            Self::AddressTypeNotSupported => 0x08,
         }
     }
 }
