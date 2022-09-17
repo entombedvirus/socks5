@@ -14,7 +14,10 @@ use futures::{future::FusedFuture, ready, select, Future, FutureExt};
 use libc;
 use tokio::{
     io::{AsyncRead, AsyncWrite},
-    net::TcpStream,
+    net::{
+        tcp::{OwnedReadHalf, OwnedWriteHalf},
+        TcpStream,
+    },
 };
 
 pub(crate) async fn splice_bidirectional(a: TcpStream, b: TcpStream) -> io::Result<()> {
@@ -28,8 +31,10 @@ pub(crate) async fn splice_bidirectional(a: TcpStream, b: TcpStream) -> io::Resu
     //     a_to_b: splice_one_way(a, b),
     //     b_to_a: splice_one_way(b, a),
     // };
-    let mut a_to_b = splice_one_way(&a, &b)?;
-    let mut b_to_a = splice_one_way(&b, &a)?;
+    let (a_read, a_write) = a.into_split();
+    let (b_read, b_write) = b.into_split();
+    let mut a_to_b = splice_one_way(a_read, b_write)?;
+    let mut b_to_a = splice_one_way(b_read, a_write)?;
     select! {
         res = a_to_b => {
             if let Err(err) = res {
@@ -101,10 +106,10 @@ fn sys_pipe() -> io::Result<(RawFd, RawFd)> {
 //     }
 // }
 
-fn splice_one_way<'a>(
-    reader: &'a TcpStream,
-    writer: &'a TcpStream,
-) -> Result<SpliceFuture<'a>, io::Error> {
+fn splice_one_way(
+    reader: OwnedReadHalf,
+    writer: OwnedWriteHalf,
+) -> Result<SpliceFuture, io::Error> {
     let (buf_read, buf_write) = sys_pipe()?;
     Ok(SpliceFuture {
         state: TransferState::Running,
@@ -124,17 +129,17 @@ enum TransferState {
 }
 
 #[derive(Debug)]
-struct SpliceFuture<'a> {
+struct SpliceFuture {
     state: TransferState,
-    reader: &'a TcpStream,
-    writer: &'a TcpStream,
+    reader: OwnedReadHalf,
+    writer: OwnedWriteHalf,
     buf_read: RawFd,
     buf_write: RawFd,
     num_buf: usize,
     read_done: bool,
 }
 
-impl<'a> SpliceFuture<'a> {
+impl SpliceFuture {
     fn splice(fd_in: RawFd, fd_out: RawFd, len: usize) -> io::Result<usize> {
         cvt!(unsafe {
             libc::splice(
@@ -149,7 +154,7 @@ impl<'a> SpliceFuture<'a> {
     }
 }
 
-impl<'a> Future for SpliceFuture<'a> {
+impl Future for SpliceFuture {
     type Output = io::Result<()>;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
@@ -158,13 +163,16 @@ impl<'a> Future for SpliceFuture<'a> {
             TransferState::Done => Poll::Ready(Ok(())),
             TransferState::Running => loop {
                 if !dbg!(self.read_done) {
-                    let read_op = self.reader.try_io(tokio::io::Interest::READABLE, || {
-                        dbg!(Self::splice(
-                            self.reader.as_raw_fd(),
-                            self.buf_write,
-                            64 << 10
-                        ))
-                    });
+                    let read_op =
+                        self.reader
+                            .as_ref()
+                            .try_io(tokio::io::Interest::READABLE, || {
+                                dbg!(Self::splice(
+                                    self.reader.as_ref().as_raw_fd(),
+                                    self.buf_write,
+                                    64 << 10
+                                ))
+                            });
                     match read_op {
                         Ok(n_read) => {
                             if n_read == 0 {
@@ -183,7 +191,7 @@ impl<'a> Future for SpliceFuture<'a> {
                     }
                     if self.num_buf == 0 && !self.read_done {
                         // register to wake up when reader is ready for reads
-                        let op = dbg!(self.reader.poll_read_ready(cx));
+                        let op = dbg!(self.reader.as_ref().poll_read_ready(cx));
                         match ready!(op) {
                             Ok(_) => continue,
                             Err(err) => return Poll::Ready(Err(err)),
@@ -193,18 +201,26 @@ impl<'a> Future for SpliceFuture<'a> {
 
                 if dbg!(self.num_buf == 0 && self.read_done) {
                     // no more left to read and no more left to write
-                    self.state = TransferState::Done;
-                    return Poll::Ready(Ok(()));
+                    match ready!(Pin::new(&mut self.writer).poll_shutdown(cx)) {
+                        Ok(_) => {
+                            self.state = TransferState::Done;
+                            return Poll::Ready(Ok(()));
+                        }
+                        Err(err) => return Poll::Ready(Err(err)),
+                    };
                 }
 
                 if self.num_buf > 0 {
-                    let write_op = self.writer.try_io(tokio::io::Interest::WRITABLE, || {
-                        dbg!(Self::splice(
-                            self.buf_read,
-                            self.writer.as_raw_fd(),
-                            self.num_buf
-                        ))
-                    });
+                    let write_op =
+                        self.writer
+                            .as_ref()
+                            .try_io(tokio::io::Interest::WRITABLE, || {
+                                dbg!(Self::splice(
+                                    self.buf_read,
+                                    self.writer.as_ref().as_raw_fd(),
+                                    self.num_buf
+                                ))
+                            });
                     match write_op {
                         Ok(n_written) => {
                             self.num_buf -= n_written;
@@ -212,7 +228,7 @@ impl<'a> Future for SpliceFuture<'a> {
                         Err(err) => {
                             if err.kind() == io::ErrorKind::WouldBlock {
                                 // register to wake up when writer is ready for writes
-                                match ready!(self.writer.poll_write_ready(cx)) {
+                                match ready!(self.writer.as_ref().poll_write_ready(cx)) {
                                     Ok(_) => continue,
                                     Err(err) => return Poll::Ready(Err(err)),
                                 };
@@ -226,13 +242,13 @@ impl<'a> Future for SpliceFuture<'a> {
     }
 }
 
-impl<'a> FusedFuture for SpliceFuture<'a> {
+impl FusedFuture for SpliceFuture {
     fn is_terminated(&self) -> bool {
         self.state == TransferState::Done
     }
 }
 
-impl<'a> Drop for SpliceFuture<'a> {
+impl Drop for SpliceFuture {
     fn drop(&mut self) {
         unsafe {
             libc::close(self.buf_read);
