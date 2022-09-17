@@ -1,4 +1,5 @@
 mod async_proto;
+mod copy;
 
 use futures::future::TryFutureExt;
 use tokio::{
@@ -81,7 +82,6 @@ async fn serve_connect_request(
         request,
     }: ServingConnectRequest,
 ) -> io::Result<()> {
-    dbg!(&request);
     match request.cmd {
         proto::ClientCommand::EstablishConnection => {
             serve_establish_connection(stream, request).await
@@ -131,7 +131,12 @@ async fn serve_establish_port_bindings(
     };
     stream.write_all(&resp.as_bytes()).await?;
 
+    #[cfg(not(target_os = "linux"))]
     copy_bidirectional(&mut stream, &mut incoming_stream).await?;
+
+    #[cfg(target_os = "linux")]
+    copy::splice_bidirectional(stream, incoming_stream).await?;
+
     Ok(())
 }
 
@@ -153,7 +158,12 @@ async fn serve_establish_connection(
     };
     stream.write_all(&resp.as_bytes()).await?;
 
-    let (a, b) = copy_bidirectional(&mut stream, &mut dialed_conn).await?;
-    eprintln!("proxied total {}, bytes", a + b);
+    #[cfg(not(target_os = "linux"))]
+    copy_bidirectional(&mut stream, &mut dialed_conn).await?;
+
+    #[cfg(target_os = "linux")]
+    copy::splice_bidirectional(stream, dialed_conn).await?;
+
+    eprintln!("serve_establish_connection finished");
     Ok(())
 }
