@@ -9,7 +9,7 @@ use std::{
     task::{Context, Poll},
 };
 
-use futures::{ready, select, Future, FutureExt};
+use futures::{future::FusedFuture, ready, select, Future};
 use libc;
 use tokio::{
     io::AsyncWrite,
@@ -22,8 +22,8 @@ use tokio::{
 pub(crate) async fn splice_bidirectional(a: TcpStream, b: TcpStream) -> io::Result<()> {
     let (a_read, a_write) = a.into_split();
     let (b_read, b_write) = b.into_split();
-    let mut a_to_b = splice_one_way(a_read, b_write)?.fuse();
-    let mut b_to_a = splice_one_way(b_read, a_write)?.fuse();
+    let mut b_to_a = splice_one_way(b_read, a_write)?;
+    let mut a_to_b = splice_one_way(a_read, b_write)?;
     select! {
         res = a_to_b => {
             if let Err(err) = res {
@@ -120,11 +120,11 @@ impl SpliceFuture {
             .reader
             .as_ref()
             .try_io(tokio::io::Interest::READABLE, || {
-                dbg!(Self::splice(
+                Self::splice(
                     self.reader.as_ref().as_raw_fd(),
                     self.buf_write.as_raw_fd(),
-                    64 << 10
-                ))
+                    64 << 10,
+                )
             });
         match read_op {
             Ok(nread) => {
@@ -147,11 +147,11 @@ impl SpliceFuture {
             .writer
             .as_ref()
             .try_io(tokio::io::Interest::WRITABLE, || {
-                dbg!(Self::splice(
+                Self::splice(
                     self.buf_read.as_raw_fd(),
                     self.writer.as_ref().as_raw_fd(),
-                    self.num_buf
-                ))
+                    self.num_buf,
+                )
             });
         match write_op {
             Ok(n_written) => Poll::Ready(Ok(n_written)),
@@ -181,9 +181,17 @@ impl Future for SpliceFuture {
                 self.num_buf -= ready!(self.do_write_op(cx))?;
             }
 
-            if self.num_buf == 0 && self.read_done {
+            if self.is_terminated() {
                 return Pin::new(&mut self.writer).poll_shutdown(cx);
             }
         }
+    }
+}
+
+impl FusedFuture for SpliceFuture {
+    fn is_terminated(&self) -> bool {
+        // we are done when the reader is closed and we have written everything we had previously
+        // buffered
+        self.num_buf == 0 && self.read_done
     }
 }
