@@ -1,19 +1,18 @@
 use std::{
-    borrow::BorrowMut,
     io,
-    marker::Unpin,
-    os::unix::prelude::{AsRawFd, RawFd},
+    os::unix::{
+        self,
+        prelude::{AsRawFd, OwnedFd, RawFd},
+    },
     pin::Pin,
     ptr,
     task::{Context, Poll},
-    thread::{self, sleep_ms},
-    time::Duration,
 };
 
-use futures::{future::FusedFuture, ready, select, Future, FutureExt};
+use futures::{ready, select, Future, FutureExt};
 use libc;
 use tokio::{
-    io::{AsyncRead, AsyncWrite},
+    io::AsyncWrite,
     net::{
         tcp::{OwnedReadHalf, OwnedWriteHalf},
         TcpStream,
@@ -21,20 +20,10 @@ use tokio::{
 };
 
 pub(crate) async fn splice_bidirectional(a: TcpStream, b: TcpStream) -> io::Result<()> {
-    // let a = a.as_raw_fd();
-    // let b = b.as_raw_fd();
-    //
-    // let s = SpliceBirectional {
-    //     // a,
-    //     // b,
-    //     // a_to_b: splice_one_way(a_reader, b_writer),
-    //     a_to_b: splice_one_way(a, b),
-    //     b_to_a: splice_one_way(b, a),
-    // };
     let (a_read, a_write) = a.into_split();
     let (b_read, b_write) = b.into_split();
-    let mut a_to_b = splice_one_way(a_read, b_write)?;
-    let mut b_to_a = splice_one_way(b_read, a_write)?;
+    let mut a_to_b = splice_one_way(a_read, b_write)?.fuse();
+    let mut b_to_a = splice_one_way(b_read, a_write)?.fuse();
     select! {
         res = a_to_b => {
             if let Err(err) = res {
@@ -49,6 +38,18 @@ pub(crate) async fn splice_bidirectional(a: TcpStream, b: TcpStream) -> io::Resu
             a_to_b.await
         }
     }
+}
+
+fn splice_one_way(reader: OwnedReadHalf, writer: OwnedWriteHalf) -> io::Result<SpliceFuture> {
+    let (buf_read, buf_write) = sys_pipe()?;
+    Ok(SpliceFuture {
+        reader,
+        writer,
+        buf_read,
+        buf_write,
+        num_buf: 0,
+        read_done: false,
+    })
 }
 
 macro_rules! try_libc {
@@ -73,7 +74,8 @@ macro_rules! cvt {
     }};
 }
 
-fn sys_pipe() -> io::Result<(RawFd, RawFd)> {
+fn sys_pipe() -> io::Result<(OwnedFd, OwnedFd)> {
+    use unix::io::FromRawFd;
     let mut pipefd = [0; 2];
     try_libc!(unsafe { libc::pipe(pipefd.as_mut_ptr()) });
     for fd in &pipefd {
@@ -82,59 +84,19 @@ fn sys_pipe() -> io::Result<(RawFd, RawFd)> {
         let ret = try_libc!(unsafe { libc::fcntl(*fd, libc::F_GETFL) });
         try_libc!(unsafe { libc::fcntl(*fd, libc::F_SETFL, ret | libc::O_NONBLOCK) });
     }
-    Ok((pipefd[0], pipefd[1]))
-}
-
-// struct SpliceBirectional {
-//     // a: &'a mut TcpStream,
-//     // b: &'a mut TcpStream,
-//     a_to_b: SpliceFuture,
-//     b_to_a: SpliceFuture,
-// }
-
-// impl Future for SpliceBirectional {
-//     type Output = io::Result<()>;
-
-//     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-//         let a_to_b = Pin::new(&mut self.a_to_b).poll(cx);
-//         let b_to_a = Pin::new(&mut self.b_to_a).poll(cx);
-//         if a_to_b.is_pending() || b_to_a.is_pending() {
-//             Poll::Pending
-//         } else {
-//             Poll::Ready(Ok(()))
-//         }
-//     }
-// }
-
-fn splice_one_way(
-    reader: OwnedReadHalf,
-    writer: OwnedWriteHalf,
-) -> Result<SpliceFuture, io::Error> {
-    let (buf_read, buf_write) = sys_pipe()?;
-    Ok(SpliceFuture {
-        state: TransferState::Running,
-        reader,
-        writer,
-        buf_read,
-        buf_write,
-        num_buf: 0,
-        read_done: false,
-    })
-}
-
-#[derive(Debug, PartialEq)]
-enum TransferState {
-    Running,
-    Done,
+    Ok((
+        // safety: pipe descriptors are not shared, and require no other cleanup other than close
+        unsafe { unix::io::OwnedFd::from_raw_fd(pipefd[0]) },
+        unsafe { unix::io::OwnedFd::from_raw_fd(pipefd[1]) },
+    ))
 }
 
 #[derive(Debug)]
 struct SpliceFuture {
-    state: TransferState,
     reader: OwnedReadHalf,
     writer: OwnedWriteHalf,
-    buf_read: RawFd,
-    buf_write: RawFd,
+    buf_read: OwnedFd,
+    buf_write: OwnedFd,
     num_buf: usize,
     read_done: bool,
 }
@@ -152,107 +114,76 @@ impl SpliceFuture {
             )
         })
     }
+
+    fn do_read_op(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<usize>> {
+        let read_op = self
+            .reader
+            .as_ref()
+            .try_io(tokio::io::Interest::READABLE, || {
+                dbg!(Self::splice(
+                    self.reader.as_ref().as_raw_fd(),
+                    self.buf_write.as_raw_fd(),
+                    64 << 10
+                ))
+            });
+        match read_op {
+            Ok(nread) => {
+                self.read_done = nread == 0;
+                Poll::Ready(read_op)
+            }
+            Err(err) => {
+                if err.kind() == io::ErrorKind::WouldBlock {
+                    ready!(self.reader.as_ref().poll_read_ready(cx))?;
+                    Poll::Ready(Ok(0))
+                } else {
+                    Poll::Ready(Err(err))
+                }
+            }
+        }
+    }
+
+    fn do_write_op(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<usize>> {
+        let write_op = self
+            .writer
+            .as_ref()
+            .try_io(tokio::io::Interest::WRITABLE, || {
+                dbg!(Self::splice(
+                    self.buf_read.as_raw_fd(),
+                    self.writer.as_ref().as_raw_fd(),
+                    self.num_buf
+                ))
+            });
+        match write_op {
+            Ok(n_written) => Poll::Ready(Ok(n_written)),
+            Err(err) => {
+                if err.kind() == io::ErrorKind::WouldBlock {
+                    // register to wake up when writer is ready for writes
+                    ready!(self.writer.as_ref().poll_write_ready(cx))?;
+                    Poll::Ready(Ok(0))
+                } else {
+                    Poll::Ready(Err(err))
+                }
+            }
+        }
+    }
 }
 
 impl Future for SpliceFuture {
     type Output = io::Result<()>;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        dbg!(&self);
-        match self.state {
-            TransferState::Done => Poll::Ready(Ok(())),
-            TransferState::Running => loop {
-                if !dbg!(self.read_done) {
-                    let read_op =
-                        self.reader
-                            .as_ref()
-                            .try_io(tokio::io::Interest::READABLE, || {
-                                dbg!(Self::splice(
-                                    self.reader.as_ref().as_raw_fd(),
-                                    self.buf_write,
-                                    64 << 10
-                                ))
-                            });
-                    match read_op {
-                        Ok(n_read) => {
-                            if n_read == 0 {
-                                // end of input
-                                self.read_done = true;
-                            } else {
-                                self.num_buf += n_read
-                            }
-                        }
-                        Err(err) => {
-                            if err.kind() != io::ErrorKind::WouldBlock {
-                                return Poll::Ready(Err(err));
-                            }
-                            // read would block, fallthrough to writing
-                        }
-                    }
-                    if self.num_buf == 0 && !self.read_done {
-                        // register to wake up when reader is ready for reads
-                        let op = dbg!(self.reader.as_ref().poll_read_ready(cx));
-                        match ready!(op) {
-                            Ok(_) => continue,
-                            Err(err) => return Poll::Ready(Err(err)),
-                        };
-                    }
-                }
+        loop {
+            while self.num_buf == 0 && !self.read_done {
+                self.num_buf += ready!(self.do_read_op(cx))?;
+            }
 
-                if dbg!(self.num_buf == 0 && self.read_done) {
-                    // no more left to read and no more left to write
-                    match ready!(Pin::new(&mut self.writer).poll_shutdown(cx)) {
-                        Ok(_) => {
-                            self.state = TransferState::Done;
-                            return Poll::Ready(Ok(()));
-                        }
-                        Err(err) => return Poll::Ready(Err(err)),
-                    };
-                }
+            while self.num_buf > 0 {
+                self.num_buf -= ready!(self.do_write_op(cx))?;
+            }
 
-                if self.num_buf > 0 {
-                    let write_op =
-                        self.writer
-                            .as_ref()
-                            .try_io(tokio::io::Interest::WRITABLE, || {
-                                dbg!(Self::splice(
-                                    self.buf_read,
-                                    self.writer.as_ref().as_raw_fd(),
-                                    self.num_buf
-                                ))
-                            });
-                    match write_op {
-                        Ok(n_written) => {
-                            self.num_buf -= n_written;
-                        }
-                        Err(err) => {
-                            if err.kind() == io::ErrorKind::WouldBlock {
-                                // register to wake up when writer is ready for writes
-                                match ready!(self.writer.as_ref().poll_write_ready(cx)) {
-                                    Ok(_) => continue,
-                                    Err(err) => return Poll::Ready(Err(err)),
-                                };
-                            }
-                            return Poll::Ready(Err(err));
-                        }
-                    }
-                }
-            },
-        }
-    }
-}
-
-impl FusedFuture for SpliceFuture {
-    fn is_terminated(&self) -> bool {
-        self.state == TransferState::Done
-    }
-}
-
-impl Drop for SpliceFuture {
-    fn drop(&mut self) {
-        unsafe {
-            libc::close(self.buf_read);
-            libc::close(self.buf_write);
+            if self.num_buf == 0 && self.read_done {
+                return Pin::new(&mut self.writer).poll_shutdown(cx);
+            }
         }
     }
 }
